@@ -121,10 +121,16 @@ def process_and_save_excel():
         print("❌ 처리할 데이터가 없습니다.")
         return
 
-    # 기준일 계산: 오늘부터 정확히 1년 전
-    today = datetime.now()
-    one_year_ago = today - timedelta(days=365)
-    print(f"📅 필터링 기간 (최근 1년): {one_year_ago.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')}")
+    # =========================================================================
+    # 📌 [원하시는 기간을 직접 입력하세요] 형식: "YYYY-MM-DD"
+    # =========================================================================
+    custom_start_date = "2025-07-31"  # 시작일 (예: 1년 전 또는 특정 시작일)
+    custom_end_date = "2026-07-31"    # 종료일 (예: 오늘 또는 특정 종료일)
+    
+    start_date = datetime.strptime(custom_start_date, "%Y-%m-%d")
+    end_date = datetime.strptime(custom_end_date, "%Y-%m-%d")
+    
+    print(f"📅 직접 입력한 필터링 기간: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
 
     parsed_rows = []
 
@@ -142,13 +148,15 @@ def process_and_save_excel():
         if len(clean_date_str) == 8:
             try:
                 item_date = datetime.strptime(clean_date_str, "%Y%m%d")
-                if not (one_year_ago <= item_date <= today):
+                # 직접 입력한 시작일 ~ 종료일 사이 데이터만 통과
+                if not (start_date <= item_date <= end_date):
                     continue
             except ValueError:
                 continue
         else:
             continue
 
+        # (이하 문의처 및 사업신청방법 파싱 로직 동일)
         raw_inquiry = item.get("refrncNm") or item.get("inquiryTel") or item.get("telNo") or item.get("excInsttTel") or "문의처 참조"
         dept_name, phone_num, email_addr = parse_contact_info(raw_inquiry)
 
@@ -172,16 +180,17 @@ def process_and_save_excel():
         parsed_rows.append(row)
 
     if not parsed_rows:
-        print("⚠️ 조건(최근 1년 이내)에 일치하는 공고 데이터가 없습니다.")
+        print("⚠️ 입력하신 기간에 일치하는 공고 데이터가 없습니다.")
         return
 
     df = pd.DataFrame(parsed_rows)
-    file_name = f"B2G_Bizinfo_Report_{today.strftime('%Y%m%d')}.xlsx"
+    # 파일명에 오늘 날짜나 지정일 표기
+    file_name = f"B2G_Bizinfo_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
     
     try:
         df.to_excel(file_name, index=False, engine='openpyxl')
         print(f"🎉 성공적으로 엑셀 파일이 저장되었습니다! 파일명: {file_name}")
-        print(f"📊 총 수집 및 저장된 최근 1년 치 공고 건수: {len(df)}건")
+        print(f"📊 총 수집 및 저장된 공고 건수: {len(df)}건")
         
         git_commit_and_push(file_name)
     except Exception as e:
