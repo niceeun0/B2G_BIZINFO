@@ -3,7 +3,7 @@ import os
 import json
 import subprocess
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import urllib3
 
 # HTTPS 보안 경고 숨김
@@ -22,7 +22,6 @@ def fetch_all_bizinfo_data():
         try:
             print(f"⏳ [시도 {attempt}/{max_retries}] curl 명령어로 기업마당 API 우회 호출 중...")
             
-            # 깃허브 서버 IP 차단을 우회하기 위해 리눅스 curl 명령어 사용
             curl_cmd = ["curl", "-s", "-k", "--max-time", "40", target_url]
             result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=45)
             
@@ -69,26 +68,13 @@ def process_and_save_excel():
         print("❌ 처리할 데이터가 없습니다.")
         return
 
-    today = datetime.now()
-    one_year_ago = today - timedelta(days=365)
-    print(f"📅 필터링 기간: {one_year_ago.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')}")
-
     parsed_rows = []
 
     for item in raw_items:
-        reg_date_str = str(item.get("pblancDe") or item.get("regDt") or item.get("creatDt") or "").strip()
-        clean_date_str = reg_date_str.replace("-", "").replace(".", "")[:8]
-        
-        if len(clean_date_str) == 8:
-            try:
-                item_date = datetime.strptime(clean_date_str, "%Y%m%d")
-                if not (one_year_ago <= item_date <= today):
-                    continue
-            except ValueError:
-                continue
-        else:
-            continue
+        # 날짜 검증 없이 API에서 가져온 원본 등록일자 그대로 사용
+        reg_date_str = str(item.get("pblancDe") or item.get("regDt") or item.get("creatDt") or "정보 없음").strip()
 
+        # 요청하신 컬럼 매핑
         row = {
             "소관기관명": item.get("author") or item.get("jrsdInsttNm") or "정보 없음",
             "사업수행기관명": item.get("excInsttNm") or "정보 없음",
@@ -102,10 +88,11 @@ def process_and_save_excel():
         parsed_rows.append(row)
 
     if not parsed_rows:
-        print("⚠️ 조건(최근 1년 이내)에 일치하는 공고 데이터가 없습니다.")
+        print("⚠️ 변환된 데이터가 없습니다.")
         return
 
     df = pd.DataFrame(parsed_rows)
+    today = datetime.now()
     file_name = f"B2G_Bizinfo_Report_{today.strftime('%Y%m%d')}.xlsx"
     
     try:
