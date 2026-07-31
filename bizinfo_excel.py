@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import subprocess
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -36,6 +37,28 @@ def fetch_all_bizinfo_data():
         print(f"❌ [통신 에러 발생]: {str(e)}")
         
     return []
+
+def git_commit_and_push(file_path):
+    """생성된 엑셀 파일을 깃허브 저장소에 자동으로 커밋 및 푸시합니다."""
+    try:
+        print("🔄 깃허브 저장소로 엑셀 파일 업로드 중...")
+        subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=True)
+        subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+        
+        subprocess.run(["git", "add", file_path], check=True)
+        
+        # 커밋 메시지에 오늘 날짜 반영
+        commit_msg = f"Auto-update Excel report: {datetime.now().strftime('%Y-%m-%d')}"
+        res = subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True, text=True)
+        
+        if "nothing to commit" in res.stdout:
+            print("ℹ️ 변경된 엑셀 내용이 없어 커밋을 생략합니다.")
+            return
+
+        subprocess.run(["git", "push"], check=True)
+        print("🎉 깃허브 저장소로 엑셀 파일 업로드 완료!")
+    except Exception as e:
+        print(f"❌ 깃허브 자동 업로드 실패: {str(e)}")
 
 def process_and_save_excel():
     raw_items = fetch_all_bizinfo_data()
@@ -91,6 +114,9 @@ def process_and_save_excel():
         df.to_excel(file_name, index=False, engine='openpyxl')
         print(f"🎉 성공적으로 엑셀 파일이 저장되었습니다! 파일명: {file_name}")
         print(f"📊 총 수집 및 저장된 공고 건수: {len(df)}건")
+        
+        # 5. 깃허브에 자동 업로드 실행
+        git_commit_and_push(file_name)
     except Exception as e:
         print(f"❌ 엑셀 저장 실패: {str(e)}")
 
