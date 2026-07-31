@@ -71,17 +71,23 @@ def process_and_save_excel():
     parsed_rows = []
 
     for item in raw_items:
-        # 날짜 검증 없이 API에서 가져온 원본 등록일자 그대로 사용
-        reg_date_str = str(item.get("pblancDe") or item.get("regDt") or item.get("creatDt") or "정보 없음").strip()
+        # 등록일자 추출 (pblancDe, regDt, creatPnttm 등 복합 키 대응)
+        reg_date_str = str(
+            item.get("pblancDe") or 
+            item.get("regDt") or 
+            item.get("creatPnttm") or 
+            item.get("creatDt") or 
+            "정보 없음"
+        ).strip()
 
-        # 요청하신 컬럼 매핑
+        # 요청하신 8가지 컬럼 매핑 (API 원본 키와 상세 대조)
         row = {
             "소관기관명": item.get("author") or item.get("jrsdInsttNm") or "정보 없음",
             "사업수행기관명": item.get("excInsttNm") or "정보 없음",
             "공고명": item.get("pblancNm") or item.get("title") or "제목 없음",
             "담당자": item.get("managingEditor") or item.get("chargerNm") or "정보 없음",
             "관리자": item.get("webMaster") or "정보 없음",
-            "문의처": item.get("inquiryTel") or item.get("telNo") or item.get("excInsttTel") or "문의처 참조",
+            "문의처": item.get("refrncNm") or item.get("inquiryTel") or item.get("telNo") or item.get("excInsttTel") or "문의처 참조",
             "기관담당자정보": item.get("chargerInfo") or item.get("deptNm") or "정보 없음",
             "등록일자": reg_date_str
         }
