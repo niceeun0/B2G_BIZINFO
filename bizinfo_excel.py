@@ -3,7 +3,6 @@ import os
 import json
 import re
 import subprocess
-import time
 import pandas as pd
 from datetime import datetime, timedelta
 import urllib3
@@ -11,7 +10,7 @@ import urllib3
 # HTTPS 보안 경고 숨김
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 기업마당 API 정보
+# 기업마당 API 정보 (페이징 없이 한 번에 넉넉하게 대량 호출)
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
@@ -61,58 +60,39 @@ def parse_apply_method(raw_text):
     return method_text, email_str
 
 def fetch_all_bizinfo_data():
-    """1000개씩 끊어서 순차적으로 안전하게 전체 데이터를 수집합니다."""
-    all_items = []
-    page_index = 1
-    display_count = 1000  # 한 번에 1000개씩 요청
-    max_pages = 5         # 최대 5페이지(총 5000개)까지 안전하게 탐색
+    """페이징 없이 단일 호출로 최대 3000건의 데이터를 안전하게 수집합니다."""
+    target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=3000"
     
-    for page in range(1, max_pages + 1):
-        target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt={display_count}&pageIndex={page}"
-        print(f"⏳ [페이지 {page}] 1000개 단위 데이터 요청 중...")
-        
-        curl_cmd = [
-            "curl", "-s", "-k", 
-            "--max-time", "40", 
-            "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", 
-            target_url
-        ]
-        
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
         try:
-            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=45)
+            print(f"⏳ [시도 {attempt}/{max_retries}] 기업마당 API 대량 호출 중 (searchCnt=3000)...")
+            
+            curl_cmd = [
+                "curl", "-s", "-k", 
+                "--max-time", "60", 
+                "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", 
+                target_url
+            ]
+            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=70)
+            
             if result.returncode == 0 and result.stdout:
                 res_body = result.stdout.strip()
                 if res_body.startswith("{") or res_body.startswith("["):
                     data = json.loads(res_body)
                     items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                    
-                    if not items:
-                        print(f"🎯 [수집 완료] 더 이상 가져올 데이터가 없습니다. (총 누적: {len(all_items)}건)")
-                        break
-                        
-                    all_items.extend(items)
-                    print(f"➕ [성공] {len(items)}건 추가 (누적 총 {len(all_items)}건)")
-                    
-                    # 가져온 개수가 1000개보다 적다면 마지막 페이지임
-                    if len(items) < display_count:
-                        print("🎯 [수집 완료] 마지막 페이지 도달.")
-                        break
+                    print(f"🎯 [수집 성공] 총 {len(items)}건의 원본 데이터를 가져왔습니다.")
+                    return items
                 else:
                     print(f"⚠️ [API 응답 오류]: {res_body[:100]}")
-                    break
             else:
                 print(f"⚠️ [통신 실패]: {result.stderr}")
-                break
         except Exception as e:
-            print(f"⚠️ [통신 에러]: {str(e)}")
-            break
-            
-        # 서버 과부하 방지 및 차단 회피를 위해 3초 대기 후 다음 1000개 요청
-        if page < max_pages:
-            print("💤 서버 안정화를 위해 3초 대기 중...")
-            time.sleep(3)
-            
-    return all_items
+            print(f"⚠️ [통신 에러 (시도 {attempt})]: {str(e)}")
+            if attempt < max_retries:
+                subprocess.run(["sleep", "3"])
+                
+    return []
 
 def git_commit_and_push(file_path):
     """생성된 엑셀 파일을 깃허브 저장소에 자동으로 커밋 및 푸시합니다."""
