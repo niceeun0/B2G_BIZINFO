@@ -4,13 +4,13 @@ import json
 import re
 import subprocess
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import urllib3
 
 # HTTPS 보안 경고 숨김
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 기업마당 API 정보
+# 기업마당 API 정보 (최대한 넉넉하게 대량 호출)
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
@@ -60,48 +60,33 @@ def parse_apply_method(raw_text):
     return method_text, email_str
 
 def fetch_all_bizinfo_data():
-    """페이지네이션을 적용하여 한도 없이 전체 데이터를 모두 수집합니다."""
-    all_items = []
-    page_index = 1
-    display_count = 1000  # 한 번에 요청할 최대 갯수
+    """기업마당 API에서 최대한 많은 데이터를 대량으로 수집합니다."""
+    # 한 번에 3000건을 넉넉하게 요청하여 누락 방지
+    target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=3000"
     
-    while True:
-        target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt={display_count}&pageIndex={page_index}"
-        print(f"⏳ [페이지 {page_index}] curl 명령어로 데이터 수집 중...")
-        
-        curl_cmd = ["curl", "-s", "-k", "--max-time", "40", target_url]
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
         try:
-            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=45)
+            print(f"⏳ [시도 {attempt}/{max_retries}] curl 명령어로 기업마당 API 대량 호출 중...")
+            
+            curl_cmd = ["curl", "-s", "-k", "--max-time", "50", target_url]
+            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=60)
+            
             if result.returncode == 0 and result.stdout:
                 res_body = result.stdout.strip()
                 if res_body.startswith("{") or res_body.startswith("["):
                     data = json.loads(res_body)
                     items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                    
-                    if not items:
-                        print("🎯 더 이상 가져올 데이터가 없습니다. 수집을 완료합니다.")
-                        break
-                        
-                    all_items.extend(items)
-                    print(f"➕ 현재 페이지에서 {len(items)}건 수집 (누적 총 {len(all_items)}건)")
-                    
-                    # 가져온 개수가 요청한 단위보다 적으면 마지막 페이지임
-                    if len(items) < display_count:
-                        break
-                        
-                    page_index += 1
+                    print(f"🎯 [수집 성공] 총 {len(items)}건의 원본 데이터를 가져왔습니다.")
+                    return items
                 else:
                     print(f"⚠️ [API 응답 형식 오류]: {res_body[:100]}")
-                    break
-            else:
-                print("⚠️ 통신 실패 또는 응답 없음")
-                break
         except Exception as e:
-            print(f"❌ [통신 에러]: {str(e)}")
-            break
-            
-    print(f"🎉 [전체 수집 성공] 총 {len(all_items)}건의 데이터를 확보했습니다.")
-    return all_items
+            print(f"⚠️ [통신 경고 (시도 {attempt})]: {str(e)}")
+            if attempt < max_retries:
+                subprocess.run(["sleep", "3"])
+                
+    return []
 
 def git_commit_and_push(file_path):
     """생성된 엑셀 파일을 깃허브 저장소에 자동으로 커밋 및 푸시합니다."""
@@ -130,16 +115,36 @@ def process_and_save_excel():
         print("❌ 처리할 데이터가 없습니다.")
         return
 
+    # 기준일 계산: 오늘부터 정확히 1년 전
+    today = datetime.now()
+    one_year_ago = today - timedelta(days=365)
+    print(f"📅 필터링 기간 (최근 1년): {one_year_ago.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')}")
+
     parsed_rows = []
 
     for item in raw_items:
+        # 등록일자 추출 및 표준화
         reg_date_str = str(
             item.get("pblancDe") or 
             item.get("regDt") or 
             item.get("creatPnttm") or 
             item.get("creatDt") or 
-            "정보 없음"
+            ""
         ).strip()
+        
+        clean_date_str = reg_date_str.replace("-", "").replace(".", "")[:8]
+        
+        if len(clean_date_str) == 8:
+            try:
+                item_date = datetime.strptime(clean_date_str, "%Y%m%d")
+                # 정확히 1년 전 ~ 오늘 사이 데이터만 통과
+                if not (one_year_ago <= item_date <= today):
+                    continue
+            except ValueError:
+                continue
+        else:
+            # 날짜 형식을 파싱할 수 없는 경우 안전하게 포함하거나 건너뜀 (여기서는 1년 치 엄격 필터링)
+            continue
 
         # 문의처 파싱
         raw_inquiry = item.get("refrncNm") or item.get("inquiryTel") or item.get("telNo") or item.get("excInsttTel") or "문의처 참조"
@@ -167,17 +172,16 @@ def process_and_save_excel():
         parsed_rows.append(row)
 
     if not parsed_rows:
-        print("⚠️ 변환된 데이터가 없습니다.")
+        print("⚠️ 조건(최근 1년 이내)에 일치하는 공고 데이터가 없습니다.")
         return
 
     df = pd.DataFrame(parsed_rows)
-    today = datetime.now()
     file_name = f"B2G_Bizinfo_Report_{today.strftime('%Y%m%d')}.xlsx"
     
     try:
         df.to_excel(file_name, index=False, engine='openpyxl')
         print(f"🎉 성공적으로 엑셀 파일이 저장되었습니다! 파일명: {file_name}")
-        print(f"📊 총 수집 및 저장된 공고 건수: {len(df)}건")
+        print(f"📊 총 수집 및 저장된 최근 1년 치 공고 건수: {len(df)}건")
         
         git_commit_and_push(file_name)
     except Exception as e:
