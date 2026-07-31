@@ -3,6 +3,7 @@ import os
 import json
 import re
 import subprocess
+import time
 import pandas as pd
 from datetime import datetime, timedelta
 import urllib3
@@ -10,7 +11,7 @@ import urllib3
 # HTTPS 보안 경고 숨김
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 기업마당 API 정보 (페이징 없이 한 번에 넉넉하게 대량 호출)
+# 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
@@ -60,39 +61,56 @@ def parse_apply_method(raw_text):
     return method_text, email_str
 
 def fetch_all_bizinfo_data():
-    """페이징 없이 단일 호출로 최대 3000건의 데이터를 안전하게 수집합니다."""
-    target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=3000"
+    """서버 과부하를 막기 위해 1000개씩 페이지를 나누어 안전하게 전체 데이터를 수집합니다."""
+    all_items = []
+    display_count = 1000  # 한 번에 1000개씩 요청
+    max_pages = 3         # 최대 3페이지(총 3000개)까지 순차 탐색
     
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
+    for page in range(1, max_pages + 1):
+        target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt={display_count}&pageIndex={page}"
+        print(f"⏳ [페이지 {page}/{max_pages}] 기업마당 API 안전 호출 중...")
+        
+        curl_cmd = [
+            "curl", "-s", "-k", 
+            "--max-time", "40", 
+            "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", 
+            target_url
+        ]
+        
         try:
-            print(f"⏳ [시도 {attempt}/{max_retries}] 기업마당 API 대량 호출 중 (searchCnt=3000)...")
-            
-            curl_cmd = [
-                "curl", "-s", "-k", 
-                "--max-time", "60", 
-                "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", 
-                target_url
-            ]
-            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=70)
-            
+            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=45)
             if result.returncode == 0 and result.stdout:
                 res_body = result.stdout.strip()
                 if res_body.startswith("{") or res_body.startswith("["):
                     data = json.loads(res_body)
                     items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                    print(f"🎯 [수집 성공] 총 {len(items)}건의 원본 데이터를 가져왔습니다.")
-                    return items
+                    
+                    if not items:
+                        print(f"🎯 [수집 완료] 더 이상 가져올 데이터가 없습니다. (총 누적: {len(all_items)}건)")
+                        break
+                        
+                    all_items.extend(items)
+                    print(f"➕ [성공] {len(items)}건 추가 (누적 총 {len(all_items)}건)")
+                    
+                    if len(items) < display_count:
+                        print("🎯 [수집 완료] 마지막 페이지 도달.")
+                        break
                 else:
                     print(f"⚠️ [API 응답 오류]: {res_body[:100]}")
+                    break
             else:
                 print(f"⚠️ [통신 실패]: {result.stderr}")
+                break
         except Exception as e:
-            print(f"⚠️ [통신 에러 (시도 {attempt})]: {str(e)}")
-            if attempt < max_retries:
-                subprocess.run(["sleep", "3"])
-                
-    return []
+            print(f"⚠️ [통신 에러]: {str(e)}")
+            break
+            
+        # 서버 차단 방지를 위해 페이지 간 3초 대기
+        if page < max_pages:
+            print("💤 서버 안정화를 위해 3초 대기 중...")
+            time.sleep(3)
+            
+    return all_items
 
 def git_commit_and_push(file_path):
     """생성된 엑셀 파일을 깃허브 저장소에 자동으로 커밋 및 푸시합니다."""
@@ -124,13 +142,13 @@ def process_and_save_excel():
     # =========================================================================
     # 📌 [원하시는 기간을 직접 입력하세요] 형식: "YYYY-MM-DD"
     # =========================================================================
-    custom_start_date = "2025-07-31"  # 시작일 (예: 1년 전 또는 특정 시작일)
-    custom_end_date = "2026-07-31"    # 종료일 (예: 오늘 또는 특정 종료일)
+    custom_start_date = "2025-07-31"  # 시작일
+    custom_end_date = "2026-07-31"    # 종료일 (현재)
     
     start_date = datetime.strptime(custom_start_date, "%Y-%m-%d")
     end_date = datetime.strptime(custom_end_date, "%Y-%m-%d")
     
-    print(f"📅 직접 입력한 필터링 기간: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
+    print(f"📅 필터링 기간 설정: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
 
     parsed_rows = []
 
@@ -148,7 +166,7 @@ def process_and_save_excel():
         if len(clean_date_str) == 8:
             try:
                 item_date = datetime.strptime(clean_date_str, "%Y%m%d")
-                # 직접 입력한 시작일 ~ 종료일 사이 데이터만 통과
+                # 입력하신 기간 내에 포함된 데이터만 통과
                 if not (start_date <= item_date <= end_date):
                     continue
             except ValueError:
@@ -156,7 +174,6 @@ def process_and_save_excel():
         else:
             continue
 
-        # (이하 문의처 및 사업신청방법 파싱 로직 동일)
         raw_inquiry = item.get("refrncNm") or item.get("inquiryTel") or item.get("telNo") or item.get("excInsttTel") or "문의처 참조"
         dept_name, phone_num, email_addr = parse_contact_info(raw_inquiry)
 
@@ -184,7 +201,6 @@ def process_and_save_excel():
         return
 
     df = pd.DataFrame(parsed_rows)
-    # 파일명에 오늘 날짜나 지정일 표기
     file_name = f"B2G_Bizinfo_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
     
     try:
