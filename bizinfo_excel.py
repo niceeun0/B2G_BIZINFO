@@ -3,6 +3,7 @@ import os
 import json
 import re
 import subprocess
+import time
 import pandas as pd
 from datetime import datetime, timedelta
 import urllib3
@@ -42,9 +43,12 @@ def parse_apply_method(raw_text):
     if not method_text: method_text = "신청방법 참조"
     return method_text, email_str
 
-def fetch_bizinfo_data():
-    """안정적으로 데이터를 수집합니다."""
-    target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=1000"
+def fetch_data_by_period(start_str, end_str):
+    """특정 월별 기간을 지정하여 API 데이터를 호출합니다."""
+    target_url = (
+        f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=1000"
+        f"&searchBeginDe={start_str}&searchEndDe={end_str}"
+    )
     
     curl_cmd = [
         "curl", "-s", "-k", 
@@ -60,10 +64,9 @@ def fetch_bizinfo_data():
             if res_body.startswith("{") or res_body.startswith("["):
                 data = json.loads(res_body)
                 items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                print(f"🎯 [수집 성공] 총 {len(items)}건의 데이터를 가져왔습니다.")
                 return items
     except Exception as e:
-        print(f"❌ [통신 에러]: {str(e)}")
+        print(f"⚠️ 통신 에러 ({start_str} ~ {end_str}): {str(e)}")
     return []
 
 def git_commit_and_push(file_path):
@@ -84,29 +87,51 @@ def git_commit_and_push(file_path):
         print(f"❌ 깃허브 업로드 실패: {str(e)}")
 
 def process_and_save_excel():
-    raw_items = fetch_bizinfo_data()
-    if not raw_items:
-        print("❌ 처리할 데이터가 없습니다.")
-        return
-
     custom_start_date = "2025-07-31"
     custom_end_date = "2026-07-31"
-    start_date = datetime.strptime(custom_start_date, "%Y-%m-%d")
-    end_date = datetime.strptime(custom_end_date, "%Y-%m-%d")
+    
+    start_dt = datetime.strptime(custom_start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(custom_end_date, "%Y-%m-%d")
 
-    # 고정된 파일명 사용 (누적 저장을 위해 날짜별이 아닌 고정 파일명 추천, 혹은 기존 파일 탐색)
     file_name = "B2G_Bizinfo_Accumulated_Report.xlsx"
     
-    # 1. 기존에 저장되어 있던 엑셀 파일이 있다면 불러오기
+    # 1. 기존 누적 엑셀 불러오기
     existing_df = pd.DataFrame()
     if os.path.exists(file_name):
         try:
             existing_df = pd.read_excel(file_name)
             print(f"📂 기존에 누적된 엑셀 데이터 {len(existing_df)}건을 불러왔습니다.")
         except Exception as e:
-            print(f"⚠️ 기존 엑셀 파일 읽기 실패 (새로 생성합니다): {str(e)}")
+            print(f"⚠️ 기존 엑셀 파일 읽기 실패: {str(e)}")
 
-    # 2. 이번에 새로 가져온 데이터 파싱
+    # 2. 1개월(30일) 단위로 구간을 쪼개어 데이터를 싹 다 긁어모으기
+    raw_items = []
+    seen_ids = set()
+    
+    current_start = start_dt
+    while current_start <= end_dt:
+        current_end = min(current_start + timedelta(days=30), end_dt)
+        
+        s_str = current_start.strftime("%Y%m%d")
+        e_str = current_end.strftime("%Y%m%d")
+        
+        print(f"⏳ 구간 수집 중: {current_start.strftime('%Y-%m-%d')} ~ {current_end.strftime('%Y-%m-%d')}")
+        items = fetch_data_by_period(s_str, e_str)
+        
+        for item in items:
+            item_id = item.get("pblancId") or item.get("pblancNm")
+            if item_id not in seen_ids:
+                seen_ids.add(item_id)
+                raw_items.append(item)
+                
+        current_start = current_end + timedelta(days=1)
+        time.sleep(1)
+
+    if not raw_items:
+        print("❌ 수집된 데이터가 없습니다.")
+        return
+
+    # 3. 데이터 파싱
     parsed_rows = []
     for item in raw_items:
         reg_date_str = str(item.get("pblancDe") or item.get("regDt") or item.get("creatPnttm") or item.get("creatDt") or "").strip()
@@ -114,7 +139,7 @@ def process_and_save_excel():
         if len(clean_date_str) == 8:
             try:
                 item_date = datetime.strptime(clean_date_str, "%Y%m%d")
-                if not (start_date <= item_date <= end_date): continue
+                if not (start_dt <= item_date <= end_dt): continue
             except ValueError: continue
         else: continue
 
@@ -140,17 +165,17 @@ def process_and_save_excel():
 
     new_df = pd.DataFrame(parsed_rows)
 
-    # 3. 기존 데이터와 신규 데이터를 합치기 (공고명 기준 중복 제거)
+    # 4. 기존 데이터와 합치기 (중복 제거)
     if not existing_df.empty:
         combined_df = pd.concat([existing_df, new_df]).drop_duplicates(subset=["공고명", "등록일자"], keep="last")
     else:
         combined_df = new_df
 
-    # 4. 엑셀로 저장 및 업로드
+    # 5. 저장 및 업로드
     try:
         combined_df.to_excel(file_name, index=False, engine='openpyxl')
         print(f"🎉 누적 저장 완료! 파일명: {file_name}")
-        print(f"📊 총 누적 공고 건수: {len(combined_df)}건 (신규 추가: {len(new_df)}건 중 중복 제외 반영)")
+        print(f"📊 총 누적 공고 건수: {len(combined_df)}건 (이번에 새로 반영된 데이터 포함)")
         
         git_commit_and_push(file_name)
     except Exception as e:
