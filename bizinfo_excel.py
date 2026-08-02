@@ -3,6 +3,7 @@ import os
 import json
 import re
 import subprocess
+import time
 import pandas as pd
 from datetime import datetime, timedelta
 import urllib3
@@ -10,7 +11,7 @@ import urllib3
 # HTTPS 보안 경고 숨김
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 기업마당 API 정보 (가장 안정적인 기본 형태 유지)
+# 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
@@ -59,40 +60,70 @@ def parse_apply_method(raw_text):
 
     return method_text, email_str
 
-def fetch_all_bizinfo_data():
-    """방화벽 차단을 우회하기 위해 가장 안정적인 단일 대량 호출 방식을 사용합니다."""
-    target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=1000"
+def fetch_data_by_period(start_str, end_str):
+    """특정 기간(시작일~종료일)을 지정하여 API 데이터를 호출합니다."""
+    target_url = (
+        f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=1000"
+        f"&searchBeginDe={start_str}&searchEndDe={end_str}"
+    )
     
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"⏳ [시도 {attempt}/{max_retries}] 기업마당 API 안전 호출 중...")
-            
-            curl_cmd = [
-                "curl", "-s", "-k", 
-                "--max-time", "45", 
-                "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", 
-                target_url
-            ]
-            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=50)
-            
-            if result.returncode == 0 and result.stdout:
-                res_body = result.stdout.strip()
-                if res_body.startswith("{") or res_body.startswith("["):
-                    data = json.loads(res_body)
-                    items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                    print(f"🎯 [수집 성공] 총 {len(items)}건의 원본 데이터를 가져왔습니다.")
-                    return items
-                else:
-                    print(f"⚠️ [API 응답 오류]: {res_body[:100]}")
-            else:
-                print(f"⚠️ [통신 실패]: {result.stderr}")
-        except Exception as e:
-            print(f"⚠️ [통신 에러 (시도 {attempt})]: {str(e)}")
-            if attempt < max_retries:
-                subprocess.run(["sleep", "3"])
-                
+    curl_cmd = [
+        "curl", "-s", "-k", 
+        "--max-time", "45", 
+        "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", 
+        target_url
+    ]
+    
+    try:
+        result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=50)
+        if result.returncode == 0 and result.stdout:
+            res_body = result.stdout.strip()
+            if res_body.startswith("{") or res_body.startswith("["):
+                data = json.loads(res_body)
+                items = data.get("jsonArray") or data.get("item") or data.get("items") or []
+                return items
+    except Exception as e:
+        print(f"⚠️ 통신 에러 ({start_str} ~ {end_str}): {str(e)}")
     return []
+
+def fetch_all_bizinfo_data(custom_start_str, custom_end_str):
+    """
+    5000개 이상의 대량 데이터를 누락 없이 수집하기 위해, 
+    전체 기간을 1개월(30일) 단위로 아주 잘게 쪼개어 각각 수집 후 합칩니다.
+    """
+    start_dt = datetime.strptime(custom_start_str, "%Y-%m-%d")
+    end_dt = datetime.strptime(custom_end_str, "%Y-%m-%d")
+    
+    all_items = []
+    seen_ids = set()
+    
+    current_start = start_dt
+    while current_start <= end_dt:
+        # 1개월(30일) 단위로 구간 설정
+        current_end = min(current_start + timedelta(days=30), end_dt)
+        
+        s_str = current_start.strftime("%Y%m%d")
+        e_str = current_end.strftime("%Y%m%d")
+        
+        print(f"⏳ 월별 구간 수집 중: {current_start.strftime('%Y-%m-%d')} ~ {current_end.strftime('%Y-%m-%d')}")
+        
+        items = fetch_data_by_period(s_str, e_str)
+        added_count = 0
+        for item in items:
+            item_id = item.get("pblancId") or item.get("pblancNm")
+            if item_id not in seen_ids:
+                seen_ids.add(item_id)
+                all_items.append(item)
+                added_count += 1
+                
+        print(f"➕ 해당 구간에서 {added_count}건 수집 (누적 총 {len(all_items)}건)")
+        
+        # 다음 구간으로 이동
+        current_start = current_end + timedelta(days=1)
+        time.sleep(2) # 서버 부하 방지
+        
+    print(f"🎯 [최종 수집 완료] 총 {len(all_items)}건의 고유 데이터를 확보했습니다.")
+    return all_items
 
 def git_commit_and_push(file_path):
     """생성된 엑셀 파일을 깃허브 저장소에 자동으로 커밋 및 푸시합니다."""
@@ -116,21 +147,21 @@ def git_commit_and_push(file_path):
         print(f"❌ 깃허브 자동 업로드 실패: {str(e)}")
 
 def process_and_save_excel():
-    raw_items = fetch_all_bizinfo_data()
-    if not raw_items:
-        print("❌ 처리할 데이터가 없습니다.")
-        return
-
     # =========================================================================
     # 📌 [원하시는 기간을 직접 입력하세요] 형식: "YYYY-MM-DD"
     # =========================================================================
     custom_start_date = "2025-07-31"  # 시작일
     custom_end_date = "2026-07-31"    # 종료일
     
+    print(f"📅 전체 목표 기간: {custom_start_date} ~ {custom_end_date}")
+    
+    raw_items = fetch_all_bizinfo_data(custom_start_date, custom_end_date)
+    if not raw_items:
+        print("❌ 처리할 데이터가 없습니다.")
+        return
+
     start_date = datetime.strptime(custom_start_date, "%Y-%m-%d")
     end_date = datetime.strptime(custom_end_date, "%Y-%m-%d")
-    
-    print(f"📅 필터링 기간 설정: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
 
     parsed_rows = []
 
