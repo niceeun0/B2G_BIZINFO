@@ -44,7 +44,6 @@ def parse_apply_method(raw_text):
     return method_text, email_str
 
 def fetch_data_by_period(start_str, end_str):
-    """API 서버에 명시적인 날짜 구간(YYYYMMDD)을 전달하여 과거 데이터를 강제로 끌어옵니다."""
     target_url = (
         f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=1000"
         f"&searchBeginDe={start_str}&searchEndDe={end_str}"
@@ -70,7 +69,6 @@ def fetch_data_by_period(start_str, end_str):
     return []
 
 def git_commit_and_push(file_path):
-    """생성된 엑셀 파일을 깃허브 저장소에 자동으로 커밋 및 푸시합니다."""
     try:
         subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
@@ -87,23 +85,18 @@ def git_commit_and_push(file_path):
 def process_and_save_split_and_accumulate():
     current_dir = os.getcwd()
     
-    # =========================================================================
-    # 📌 [전체 목표 기간 설정] 2025년 8월 1일 ~ 2026년 8월 3일
-    # =========================================================================
     total_start_str = "2025-08-01"
     total_end_str = "2026-08-03"
     
     start_dt = datetime.strptime(total_start_str, "%Y-%m-%d")
     end_dt = datetime.strptime(total_end_str, "%Y-%m-%d")
 
-    print(f"🚀 전체 기간({total_start_str} ~ {total_end_str}) 월별 구간별 API 집중 수집을 시작합니다...\n")
+    print(f"🚀 전체 기간({total_start_str} ~ {total_end_str}) 데이터 수집 및 통합 작업을 시작합니다...\n")
 
     current_start = start_dt
     part_num = 1
     generated_files = []
-    all_parsed_rows = []
 
-    # 월별(30일 단위)로 쪼개서 API에 직접 날짜 조건을 주고 가져오기
     while current_start <= end_dt:
         current_end = min(current_start + timedelta(days=30), end_dt)
         
@@ -117,6 +110,7 @@ def process_and_save_split_and_accumulate():
         raw_items = fetch_data_by_period(s_param, e_param)
         print(f"   👉 API 응답: {len(raw_items)}건 수집됨")
 
+        chunk_rows = []
         for item in raw_items:
             reg_date_str = str(item.get("pblancDe") or item.get("regDt") or item.get("creatPnttm") or item.get("creatDt") or "").strip()
             clean_date_str = reg_date_str.replace("-", "").replace(".", "")[:8]
@@ -124,7 +118,7 @@ def process_and_save_split_and_accumulate():
             if len(clean_date_str) == 8:
                 try:
                     item_date = datetime.strptime(clean_date_str, "%Y%m%d")
-                    if not (start_dt <= item_date <= end_dt): 
+                    if not (current_start <= item_date <= current_end): 
                         continue
                 except ValueError: 
                     continue
@@ -137,7 +131,7 @@ def process_and_save_split_and_accumulate():
             apply_method_text, apply_email = parse_apply_method(raw_apply)
             pblanc_url = item.get("pblancUrl") or item.get("rceptEngnHmpgUrl") or "링크 없음"
 
-            row = {
+            chunk_rows.append({
                 "소관기관명": item.get("author") or item.get("jrsdInsttNm") or "정보 없음",
                 "사업수행기관명": item.get("excInsttNm") or "정보 없음",
                 "공고명": item.get("pblancNm") or item.get("title") or "제목 없음",
@@ -148,70 +142,46 @@ def process_and_save_split_and_accumulate():
                 "사업신청 방법(이메일주소)": apply_email,
                 "등록일자": reg_date_str,
                 "공고URL": pblanc_url
-            }
-            all_parsed_rows.append(row)
-
-        # 구간별 개별 파일 저장
-        if raw_items:
-            df_chunk = pd.DataFrame([r for r in all_parsed_rows if s_date_str <= str(r["등록일자"]).replace("-", "").replace(".", "")[:4] + "-" + str(r["등록일자"]).replace("-", "").replace(".", "")[4:6] + "-" + str(r["등록일자"]).replace("-", "").replace(".", "")[6:8] <= e_date_str])
-            # 위 필터링 대신 해당 구간 아이템들로만 척척 담기 위해 임시 데이터프레임 생성
-            chunk_rows = []
-            for item in raw_items:
-                reg_date_str = str(item.get("pblancDe") or item.get("regDt") or item.get("creatPnttm") or item.get("creatDt") or "").strip()
-                clean_date_str = reg_date_str.replace("-", "").replace(".", "")[:8]
-                if len(clean_date_str) == 8:
-                    try:
-                        item_date = datetime.strptime(clean_date_str, "%Y%m%d")
-                        if not (current_start <= item_date <= current_end): continue
-                    except ValueError: continue
-                else: continue
-
-                raw_inquiry = item.get("refrncNm") or item.get("inquiryTel") or item.get("telNo") or item.get("excInsttTel") or "문의처 참조"
-                dept_name, phone_num, email_addr = parse_contact_info(raw_inquiry)
-                raw_apply = item.get("reqstMthPapersCn") or item.get("reqstMth") or "정보 없음"
-                apply_method_text, apply_email = parse_apply_method(raw_apply)
-                pblanc_url = item.get("pblancUrl") or item.get("rceptEngnHmpgUrl") or "링크 없음"
-
-                chunk_rows.append({
-                    "소관기관명": item.get("author") or item.get("jrsdInsttNm") or "정보 없음",
-                    "사업수행기관명": item.get("excInsttNm") or "정보 없음",
-                    "공고명": item.get("pblancNm") or item.get("title") or "제목 없음",
-                    "문의처": dept_name,
-                    "문의처(전화번호)": phone_num,
-                    "문의처(이메일주소)": email_addr,
-                    "사업신청방법": apply_method_text,
-                    "사업신청 방법(이메일주소)": apply_email,
-                    "등록일자": reg_date_str,
-                    "공고URL": pblanc_url
-                })
-            
-            if chunk_rows:
-                df_chunk = pd.DataFrame(chunk_rows)
-                file_name = f"B2G_Bizinfo_{s_date_str}_to_{e_date_str}_part{part_num}.xlsx"
-                full_file_path = os.path.join(current_dir, file_name)
-                df_chunk.to_excel(full_file_path, index=False, engine='openpyxl')
-                print(f"   📁 [분할 파일 저장] {file_name} ({len(df_chunk)}건)")
-                git_commit_and_push(full_file_path)
-                generated_files.append(full_file_path)
-                part_num += 1
+            })
+        
+        if chunk_rows:
+            df_chunk = pd.DataFrame(chunk_rows)
+            file_name = f"B2G_Bizinfo_{s_date_str}_to_{e_date_str}_part{part_num}.xlsx"
+            full_file_path = os.path.join(current_dir, file_name)
+            df_chunk.to_excel(full_file_path, index=False, engine='openpyxl')
+            print(f"   📁 [분할 파일 저장] {file_name} ({len(df_chunk)}건)")
+            git_commit_and_push(full_file_path)
+            generated_files.append(full_file_path)
+            part_num += 1
 
         current_start = current_end + timedelta(days=1)
         time.sleep(1)
 
-    # 최종 통합 누적 파일 생성
-    if all_parsed_rows:
-        final_df = pd.DataFrame(all_parsed_rows)
-        final_df = final_df.drop_duplicates(subset=["공고명", "등록일자"], keep="last")
-        
-        accumulated_file_name = "B2G_Bizinfo_Accumulated_Report.xlsx"
-        accumulated_file_path = os.path.join(current_dir, accumulated_file_name)
-        
-        final_df.to_excel(accumulated_file_path, index=False, engine='openpyxl')
-        print(f"\n🎉 [최종 통합 누적 파일 완성] {accumulated_file_name}")
-        print(f"📊 총 통합 공고 건수: {len(final_df)}건")
-        git_commit_and_push(accumulated_file_path)
+    # 💡 핵심 수정: 생성된 모든 분할 파일들을 직접 읽어서 완벽하게 합치기
+    if generated_files:
+        print("\n⏳ 생성된 모든 분할 파일들을 안전하게 취합하여 최종 누적 파일을 구축하는 중...")
+        all_dfs = []
+        for f_path in generated_files:
+            try:
+                part_df = pd.read_excel(f_path)
+                all_dfs.append(part_df)
+            except Exception as e:
+                print(f"⚠️ 파일 읽기 오류 ({os.path.basename(f_path)}): {str(e)}")
+                
+        if all_dfs:
+            final_df = pd.concat(all_dfs, ignore_index=True)
+            # 공고명과 등록일자 기준으로 중복 제거
+            final_df = final_df.drop_duplicates(subset=["공고명", "등록일자"], keep="last")
+            
+            accumulated_file_name = "B2G_Bizinfo_Accumulated_Report.xlsx"
+            accumulated_file_path = os.path.join(current_dir, accumulated_file_name)
+            
+            final_df.to_excel(accumulated_file_path, index=False, engine='openpyxl')
+            print(f"🎉 [최종 통합 누적 파일 완성] {accumulated_file_name}")
+            print(f"📊 총 통합 공고 건수: {len(final_df)}건")
+            git_commit_and_push(accumulated_file_path)
     else:
-        print("\n❌ 수집된 최종 데이터가 없습니다.")
+        print("\n❌ 수집된 분할 파일이 없습니다.")
 
     print(f"\n✨ 모든 작업이 완료되었습니다!")
 
